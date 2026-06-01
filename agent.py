@@ -1,13 +1,14 @@
 """
 PM Brief Generator Agent — Session 2
--------------------------------------
-Takes raw feedback (Slack thread, meeting notes, customer complaint)
-and returns a structured PM brief as JSON.
+--------------------------------------
+Uses Google Gemini API (FREE — no credit card required).
+Get your key at: https://aistudio.google.com → "Get API key"
 
 Usage:
     python agent.py
     python agent.py --input "your feedback text here"
     python agent.py --file feedback.txt
+    python agent.py --input "3 accounts complaining about SSO" --context "enterprise team"
 """
 
 import json
@@ -15,19 +16,19 @@ import sys
 import argparse
 import os
 from dotenv import load_dotenv
-import anthropic
+import google.generativeai as genai
 
 load_dotenv()
 
-client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from .env
+# Configure Gemini — reads GEMINI_API_KEY from .env
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 
-# ── SYSTEM PROMPT ───────────────────────────────────────────────────────────
-# This is a spec. Treat it like one.
+# ── SYSTEM PROMPT ─────────────────────────────────────────────────────────
 # Versioned: v1.0 — initial build (workshop day)
 SYSTEM_PROMPT = """You are a senior Product Manager at a B2B SaaS company.
 
-When given raw stakeholder feedback — a Slack thread, meeting notes, customer 
-complaints, sales call summary, or any unstructured input — you extract the 
+When given raw stakeholder feedback — a Slack thread, meeting notes, customer
+complaints, sales call summary, or any unstructured input — you extract the
 core signal and return a structured PM brief.
 
 RULES:
@@ -42,60 +43,59 @@ JSON SCHEMA (return exactly this structure):
   "problem": "One sentence. What is broken or missing for whom.",
   "affected": "Who is affected and how. Be specific about user segment.",
   "metrics": [
-    "First measurable success criterion (include baseline or target number if inferable)",
+    "First measurable success criterion (include baseline or target if inferable)",
     "Second measurable success criterion"
   ],
   "assumption": "The single most critical assumption to validate before building.",
-  "confidence": "high | medium | low — your confidence in this framing given the input quality",
-  "missing_context": "What additional info would most improve this brief, or null if sufficient"
+  "confidence": "high | medium | low — your confidence given the input quality",
+  "missing_context": "What would most improve this brief, or null if sufficient"
 }"""
 
-# ── CORE FUNCTION ────────────────────────────────────────────────────────────
+# ── MODEL SETUP ───────────────────────────────────────────────────────────
+model = genai.GenerativeModel(
+    model_name="gemini-2.0-flash",
+    system_instruction=SYSTEM_PROMPT,
+    generation_config=genai.GenerationConfig(
+        temperature=0.2,       # low temp = more consistent structured output
+        max_output_tokens=800,
+    ),
+)
+
+# ── CORE FUNCTION ─────────────────────────────────────────────────────────
 def generate_brief(raw_input: str, context: str = "") -> dict:
     """
     Generate a structured PM brief from raw feedback.
-    
+
     Args:
         raw_input: The raw feedback text (Slack thread, notes, complaints, etc.)
-        context: Optional — product area, team, or relevant background
-    
+        context:   Optional product area, team, or relevant background
+
     Returns:
         dict: Structured brief matching the schema above
-    
-    Raises:
-        json.JSONDecodeError: If model returns malformed JSON (rare with this prompt)
-        anthropic.APIError: If API call fails
     """
     user_message = f"Input: {raw_input}"
     if context:
         user_message += f"\n\nContext: {context}"
 
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": user_message}
-        ],
-    )
+    response = model.generate_content(user_message)
+    raw_output = response.text.strip()
 
-    raw_output = response.content[0].text.strip()
-    
     # Strip markdown fences if model adds them despite instructions
     if raw_output.startswith("```"):
         raw_output = raw_output.split("```")[1]
         if raw_output.startswith("json"):
             raw_output = raw_output[4:]
-    
+        raw_output = raw_output.strip()
+
     return json.loads(raw_output)
 
 
-# ── CLI ──────────────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Generate a PM brief from raw feedback")
-    parser.add_argument("--input", "-i", type=str, help="Feedback text (inline)")
-    parser.add_argument("--file",  "-f", type=str, help="Path to a .txt file containing feedback")
-    parser.add_argument("--context", "-c", type=str, default="", help="Optional context (product area, team)")
+    parser.add_argument("--input",   "-i", type=str, help="Feedback text (inline)")
+    parser.add_argument("--file",    "-f", type=str, help="Path to .txt file with feedback")
+    parser.add_argument("--context", "-c", type=str, default="", help="Optional context")
     args = parser.parse_args()
 
     if args.file:
@@ -104,14 +104,13 @@ def main():
     elif args.input:
         raw_input = args.input
     else:
-        # Default demo input so `python agent.py` works out of the box
+        # Default demo — works out of the box
         raw_input = (
             "Sarah from enterprise sales pinged me — Acme Corp is threatening to churn. "
             "They say onboarding took 3 weeks instead of the promised 1, their admin "
             "couldn't figure out how to set up SSO, and two of their power users say "
-            "the bulk export feature is 'broken' (not sure what that means exactly). "
-            "The CSM is also flagging that we've had 3 similar complaints this quarter "
-            "from other mid-market accounts."
+            "the bulk export feature is 'broken'. The CSM is flagging that we've had "
+            "3 similar complaints this quarter from other mid-market accounts."
         )
         print("Running with demo input...\n")
 
